@@ -1,4 +1,5 @@
 import os
+import asyncio
 import threading
 import time
 import feedparser
@@ -8,10 +9,10 @@ from telegram import Bot
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 
-RSS_FEEDS = {
-    "ایسنا": "https://www.isna.ir/rss",
-    "تسنیم": "https://www.tasnimnews.com/fa/rss",
-}
+RSS_FEEDS = [
+    "https://www.isna.ir/rss",
+    "https://www.tasnimnews.com/fa/rss"
+]
 
 sent_links = set()
 
@@ -21,20 +22,75 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"MATIX News Bot is running!")
+        self.wfile.write(b"MATIX NEWS BOT OK")
 
     def log_message(self, format, *args):
         pass
 
 
 def run_server():
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
 
-    server = HTTPServer(
-        ("0.0.0.0", port),
-        HealthHandler
-    )
 
+async def send_news():
+    bot = Bot(token=BOT_TOKEN)
+
+    for rss_url in RSS_FEEDS:
+        feed = feedparser.parse(rss_url)
+
+        for item in feed.entries[:5]:
+
+            link = item.get("link")
+
+            if not link or link in sent_links:
+                continue
+
+            title = item.get("title", "بدون عنوان")
+            summary = item.get("summary", "")
+
+            message = (
+                f"📰 <b>{title}</b>\n\n"
+                f"{summary[:500]}\n\n"
+                f"🔗 <a href='{link}'>مشاهده خبر</a>\n\n"
+                f"@imatixnews"
+            )
+
+            try:
+                await bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=message,
+                    parse_mode="HTML"
+                )
+
+                sent_links.add(link)
+                print("News sent:", title)
+
+            except Exception as e:
+                print("Telegram error:", e)
+
+
+def news_loop():
+    while True:
+
+        try:
+            asyncio.run(send_news())
+
+        except Exception as e:
+            print("News error:", e)
+
+        time.sleep(600)
+
+
+if __name__ == "__main__":
+
+    threading.Thread(
+        target=run_server,
+        daemon=True
+    ).start()
+
+    news_loop()
     server.serve_forever()
 
 
