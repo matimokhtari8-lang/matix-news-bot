@@ -7,7 +7,7 @@ import html
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import feedparser
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -59,68 +59,200 @@ def clean_text(text):
     return text.strip()
 
 
+def get_image(item):
+
+    # روش اول: media_content
+    media_content = item.get("media_content")
+
+    if media_content:
+
+        for media in media_content:
+
+            url = media.get("url")
+
+            if url:
+                return url
+
+    # روش دوم: media_thumbnail
+    media_thumbnail = item.get("media_thumbnail")
+
+    if media_thumbnail:
+
+        for media in media_thumbnail:
+
+            url = media.get("url")
+
+            if url:
+                return url
+
+    # روش سوم: enclosure
+    enclosures = item.get("enclosures")
+
+    if enclosures:
+
+        for enclosure in enclosures:
+
+            url = enclosure.get("href")
+
+            if url:
+                return url
+
+    # روش چهارم: پیدا کردن عکس داخل description
+    description = item.get("description", "")
+
+    match = re.search(
+        r'<img[^>]+src=["\']([^"\']+)["\']',
+        description,
+        re.IGNORECASE
+    )
+
+    if match:
+        return match.group(1)
+
+    return None
+
+
 async def send_news():
 
     if not BOT_TOKEN:
+
         print("ERROR: BOT_TOKEN is missing!")
+
         return
 
-    bot = Bot(token=BOT_TOKEN)
+    bot = Bot(
+        token=BOT_TOKEN
+    )
 
     for rss_url in RSS_FEEDS:
 
-        print(f"Checking RSS: {rss_url}")
+        print(
+            f"Checking RSS: {rss_url}"
+        )
 
         try:
-            feed = feedparser.parse(rss_url)
+
+            feed = feedparser.parse(
+                rss_url
+            )
 
         except Exception as error:
-            print(f"RSS error: {error}")
+
+            print(
+                f"RSS error: {error}"
+            )
+
             continue
 
         if not feed.entries:
-            print("No news found.")
-            continue
 
-        for item in feed.entries[:5]:
-
-            title = clean_text(
-                item.get("title", "بدون عنوان")
+            print(
+                "No news found."
             )
 
-            link = item.get("link")
+            continue
+
+        # فقط آخرین خبر
+        for item in feed.entries[:1]:
+
+            title = clean_text(
+                item.get(
+                    "title",
+                    "بدون عنوان"
+                )
+            )
+
+            link = item.get(
+                "link"
+            )
 
             summary = clean_text(
-                item.get("summary", "")
+                item.get(
+                    "summary",
+                    ""
+                )
             )
 
             if not link:
                 continue
 
             if len(summary) > 700:
-                summary = summary[:700] + "..."
+
+                summary = (
+                    summary[:700]
+                    + "..."
+                )
+
+            image_url = get_image(
+                item
+            )
 
             message = (
                 f"📰 <b>{html.escape(title)}</b>\n\n"
                 f"{html.escape(summary)}\n\n"
-                f"🔗 <a href=\"{html.escape(link)}\">مشاهده خبر</a>\n\n"
                 f"@imatixnews"
+            )
+
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🔗 مشاهده خبر",
+                            url=link
+                        )
+                    ]
+                ]
             )
 
             try:
 
-                await bot.send_message(
-                    chat_id=CHANNEL_ID,
-                    text=message,
-                    parse_mode="HTML",
-                    disable_web_page_preview=False
-                )
+                if image_url:
 
-                print(f"News sent: {title}")
+                    try:
+
+                        await bot.send_photo(
+                            chat_id=CHANNEL_ID,
+                            photo=image_url,
+                            caption=message,
+                            parse_mode="HTML",
+                            reply_markup=keyboard
+                        )
+
+                        print(
+                            f"News with image sent: {title}"
+                        )
+
+                    except Exception as image_error:
+
+                        print(
+                            f"Image error: {image_error}"
+                        )
+
+                        await bot.send_message(
+                            chat_id=CHANNEL_ID,
+                            text=message,
+                            parse_mode="HTML",
+                            reply_markup=keyboard
+                        )
+
+                else:
+
+                    await bot.send_message(
+                        chat_id=CHANNEL_ID,
+                        text=message,
+                        parse_mode="HTML",
+                        reply_markup=keyboard
+                    )
+
+                    print(
+                        f"News without image sent: {title}"
+                    )
 
             except Exception as error:
 
-                print(f"Telegram error: {error}")
+                print(
+                    f"Telegram error: {error}"
+                )
 
 
 def run_news_loop():
@@ -128,22 +260,43 @@ def run_news_loop():
     while True:
 
         try:
-            asyncio.run(send_news())
+
+            asyncio.run(
+                send_news()
+            )
 
         except Exception as error:
-            print(f"Main error: {error}")
 
-        print("Waiting 10 minutes...")
+            print(
+                f"Main error: {error}"
+            )
 
-        time.sleep(CHECK_INTERVAL)
+        print(
+            "Waiting 10 minutes..."
+        )
+
+        time.sleep(
+            CHECK_INTERVAL
+        )
 
 
 if __name__ == "__main__":
 
-    print("==============================")
-    print("MATIX NEWS BOT")
-    print("Starting...")
-    print("==============================")
+    print(
+        "=============================="
+    )
+
+    print(
+        "MATIX NEWS BOT"
+    )
+
+    print(
+        "Starting..."
+    )
+
+    print(
+        "=============================="
+    )
 
     web_thread = threading.Thread(
         target=start_web_server,
