@@ -2,6 +2,7 @@ import os
 import asyncio
 import threading
 import time
+import sqlite3
 import json
 import html
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -19,20 +20,9 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@imatixnews")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# مدل Gemini
-GEMINI_MODEL = os.environ.get(
-    "GEMINI_MODEL",
-    "gemini-2.5-flash"
-)
+CHECK_INTERVAL = 600  # 10 minutes
 
-# هر چند دقیقه RSSها بررسی شوند
-CHECK_INTERVAL = 600
-
-# حداکثر خبر از هر منبع در هر بررسی
-MAX_NEWS_PER_SOURCE = 3
-
-# لینک‌های ارسال‌شده در اجرای فعلی
-sent_links = set()
+DB_FILE = "sent_news.db"
 
 
 # =========================================================
@@ -41,56 +31,139 @@ sent_links = set()
 
 RSS_FEEDS = [
 
-    # =========================
-    # BBC
-    # =========================
-
+    # 🌍 BBC World
     (
         "BBC World",
         "https://feeds.bbci.co.uk/news/world/rss.xml",
         "en"
     ),
 
+    # 🇬🇧 BBC UK
     (
         "BBC UK",
         "https://feeds.bbci.co.uk/news/uk/rss.xml",
         "en"
     ),
 
+    # 💻 BBC Technology
     (
         "BBC Technology",
         "https://feeds.bbci.co.uk/news/technology/rss.xml",
         "en"
     ),
 
+    # 🔬 BBC Science
     (
         "BBC Science",
         "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
         "en"
     ),
 
+    # 💰 BBC Business
     (
         "BBC Business",
         "https://feeds.bbci.co.uk/news/business/rss.xml",
         "en"
     ),
 
-    # =========================
-    # Persian sources
-    # =========================
-
+    # 🇮🇷 ISNA
     (
         "ایسنا",
         "https://www.isna.ir/rss",
         "fa"
     ),
 
+    # 🇮🇷 Tasnim
     (
         "تسنیم",
         "https://www.tasnimnews.com/fa/rss",
         "fa"
     ),
 ]
+
+
+# =========================================================
+# DATABASE
+# =========================================================
+
+def init_database():
+
+    connection = sqlite3.connect(DB_FILE)
+
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sent_news (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            link TEXT UNIQUE NOT NULL,
+            title TEXT,
+            source TEXT,
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    connection.commit()
+    connection.close()
+
+    print("SQLite database initialized.")
+
+
+def is_news_sent(link):
+
+    if not link:
+        return True
+
+    connection = sqlite3.connect(DB_FILE)
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        "SELECT 1 FROM sent_news WHERE link = ? LIMIT 1",
+        (link,)
+    )
+
+    result = cursor.fetchone()
+
+    connection.close()
+
+    return result is not None
+
+
+def save_news(link, title, source):
+
+    if not link:
+        return
+
+    connection = sqlite3.connect(DB_FILE)
+
+    cursor = connection.cursor()
+
+    try:
+
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO sent_news
+            (link, title, source)
+            VALUES (?, ?, ?)
+            """,
+            (
+                link,
+                title,
+                source
+            )
+        )
+
+        connection.commit()
+
+    except Exception as error:
+
+        print(
+            f"SQLite save error: {error}"
+        )
+
+    finally:
+
+        connection.close()
 
 
 # =========================================================
@@ -107,17 +180,25 @@ if GEMINI_API_KEY:
             api_key=GEMINI_API_KEY
         )
 
-        print("Gemini: ENABLED")
-        print(f"Gemini model: {GEMINI_MODEL}")
+        print(
+            "Gemini translation: ENABLED"
+        )
 
     except Exception as error:
 
-        print("Gemini initialization error:")
-        print(str(error))
+        print(
+            "Gemini initialization error:"
+        )
+
+        print(
+            str(error)
+        )
 
 else:
 
-    print("WARNING: GEMINI_API_KEY is not configured.")
+    print(
+        "WARNING: GEMINI_API_KEY is not configured."
+    )
 
 
 # =========================================================
@@ -142,6 +223,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         )
 
     def log_message(self, format, *args):
+
         return
 
 
@@ -173,25 +255,31 @@ def start_web_server():
 def clean_text(text):
 
     if not text:
+
         return ""
 
     text = str(text)
 
-    # حذف HTML
+    text = html.unescape(text)
+
     result = []
+
     inside_tag = False
 
     for char in text:
 
         if char == "<":
+
             inside_tag = True
             continue
 
         if char == ">":
+
             inside_tag = False
             continue
 
         if not inside_tag:
+
             result.append(char)
 
     text = "".join(result)
@@ -204,124 +292,67 @@ def clean_text(text):
 
 
 # =========================================================
-# GEMINI NEWS FILTER
+# TRANSLATE WITH GEMINI
 # =========================================================
 
-async def analyze_news(
+async def translate_to_persian(
     title,
-    description,
-    language
+    description
 ):
 
     title = clean_text(title)
+
     description = clean_text(description)
 
-    # اگر Gemini فعال نباشد
+    if not title and not description:
+
+        return title, description
+
     if gemini_client is None:
 
         print(
-            "AI FILTER: Gemini unavailable."
+            "Gemini unavailable. Original text will be used."
         )
 
-        # برای جلوگیری از انتشار اشتباه
-        # اخبار خارجی بدون AI رد می‌شوند.
-        if language == "en":
-
-            return {
-                "publish": False,
-                "reason": "Gemini unavailable"
-            }
-
-        return {
-            "publish": True,
-            "reason": "Persian source - AI unavailable",
-            "title": title,
-            "description": description
-        }
-
+        return title, description
 
     prompt = f"""
-You are the editorial AI for a Persian Telegram news channel.
+تو یک مترجم حرفه‌ای اخبار انگلیسی به فارسی هستی.
 
-Your job is to classify and rewrite a news article.
+خبر زیر را به فارسی روان، طبیعی و قابل فهم ترجمه کن.
 
-IMPORTANT EDITORIAL POLICY:
+قوانین:
 
-1. The channel is interested in news that is critical of
-   the Islamic Republic of Iran and its government,
-   including political repression, protests, human rights,
-   government actions, corruption, political conflicts,
-   and criticism of government officials.
+1. معنی خبر را تغییر نده.
+2. هیچ اطلاعاتی از خودت اضافه نکن.
+3. چیزی را حذف نکن مگر اینکه برای کوتاه‌سازی جزئی لازم باشد.
+4. نام افراد، کشورها، سازمان‌ها و مکان‌ها را دقیق ترجمه کن.
+5. متن فارسی طبیعی و صمیمی اما خبری باشد.
+6. لحن تبلیغاتی نداشته باش.
+7. درباره دین، مذهب یا عقاید مردم قضاوت نکن.
+8. اگر خبر سیاسی است، فقط محتوای خبر را ترجمه کن.
+9. هیچ منبعی به متن اضافه نکن.
+10. هیچ Markdown اضافه نکن.
+11. فقط JSON معتبر برگردان.
+12. JSON باید دقیقاً شامل title و description باشد.
 
-2. Important war, military conflict, attacks, security crises
-   and major regional conflicts may also be published.
-
-3. Important international news may be published when it is
-   relevant or significant.
-
-4. DO NOT publish content whose main purpose is insulting,
-   mocking or attacking Islam, Muslims, religious beliefs,
-   prophets, holy figures or religious sacred values.
-
-5. DO NOT invent facts.
-
-6. DO NOT change the factual meaning of the original article.
-
-7. DO NOT turn a neutral article into propaganda.
-
-8. News that is purely promotional or praising the Islamic
-   Republic government should normally be rejected.
-
-9. Criticism of a government is NOT the same as criticism
-   of a religion. Government criticism is allowed.
-
-10. If the article contains both political criticism and
-    religiously offensive material, reject it if the
-    offensive religious material is a significant part
-    of the article.
-
-11. Write in natural, simple and friendly Persian.
-
-12. Keep the tone like a professional Telegram news channel,
-    not like a formal newspaper.
-
-13. Do not add a source name.
-
-14. Do not add a URL.
-
-15. Do not use Markdown.
-
-Return ONLY valid JSON.
-
-JSON format:
-
-{{
-    "publish": true or false,
-    "category": "iran_politics" | "war" | "international" | "technology" | "science" | "business" | "other",
-    "reason": "short reason",
-    "title": "Persian title",
-    "description": "Persian short news text"
-}}
-
-TITLE:
+عنوان:
 {title}
 
-DESCRIPTION:
+متن:
 {description}
 """
-
 
     try:
 
         response = await asyncio.to_thread(
             gemini_client.models.generate_content,
-            model=GEMINI_MODEL,
+            model="gemini-3.1-flash-lite",
             contents=prompt
         )
 
         result = response.text.strip()
 
-        # حذف Markdown احتمالی
         if result.startswith("```"):
 
             result = result.replace(
@@ -338,27 +369,6 @@ DESCRIPTION:
 
         data = json.loads(result)
 
-        publish = bool(
-            data.get(
-                "publish",
-                False
-            )
-        )
-
-        category = str(
-            data.get(
-                "category",
-                "other"
-            )
-        )
-
-        reason = clean_text(
-            data.get(
-                "reason",
-                ""
-            )
-        )
-
         translated_title = clean_text(
             data.get(
                 "title",
@@ -374,26 +384,28 @@ DESCRIPTION:
         )
 
         print(
-            f"AI FILTER | publish={publish} | category={category} | reason={reason}"
+            "Translation successful."
         )
 
-        return {
-            "publish": publish,
-            "category": category,
-            "reason": reason,
-            "title": translated_title,
-            "description": translated_description
-        }
+        return (
+            translated_title,
+            translated_description
+        )
 
     except Exception as error:
 
-        print("AI FILTER ERROR:")
-        print(str(error))
+        print(
+            "TRANSLATION ERROR:"
+        )
 
-        return {
-            "publish": False,
-            "reason": "AI processing error"
-        }
+        print(
+            str(error)
+        )
+
+        return (
+            title,
+            description
+        )
 
 
 # =========================================================
@@ -430,7 +442,6 @@ def get_image(entry):
 
             return url
 
-
     media_thumbnail = entry.get(
         "media_thumbnail",
         []
@@ -441,8 +452,8 @@ def get_image(entry):
         url = media.get("url")
 
         if url:
-            return url
 
+            return url
 
     enclosures = entry.get(
         "enclosures",
@@ -451,9 +462,7 @@ def get_image(entry):
 
     for enclosure in enclosures:
 
-        url = enclosure.get(
-            "href"
-        )
+        url = enclosure.get("href")
 
         media_type = enclosure.get(
             "type",
@@ -465,60 +474,6 @@ def get_image(entry):
         ):
 
             return url
-
-
-    return None
-
-
-# =========================================================
-# GET VIDEO
-# =========================================================
-
-def get_video(entry):
-
-    media_content = entry.get(
-        "media_content",
-        []
-    )
-
-    for media in media_content:
-
-        url = media.get("url")
-
-        media_type = media.get(
-            "type",
-            ""
-        )
-
-        if url and media_type.startswith(
-            "video/"
-        ):
-
-            return url
-
-
-    enclosures = entry.get(
-        "enclosures",
-        []
-    )
-
-    for enclosure in enclosures:
-
-        url = enclosure.get(
-            "href"
-        )
-
-        media_type = enclosure.get(
-            "type",
-            ""
-        )
-
-        if url and media_type.startswith(
-            "video/"
-        ):
-
-            return url
-
 
     return None
 
@@ -533,29 +488,33 @@ def create_message(
 ):
 
     title = clean_text(title)
+
     description = clean_text(description)
 
-    # جلوگیری از خراب شدن HTML تلگرام
-    title = html.escape(title)
-    description = html.escape(description)
-
-    if len(description) > 900:
+    # محدودیت کپشن تلگرام
+    if len(description) > 850:
 
         description = (
-            description[:900]
+            description[:850]
             + "..."
         )
 
-    if description:
+    safe_title = html.escape(title)
+
+    safe_description = html.escape(
+        description
+    )
+
+    if safe_description:
 
         return (
-            f"📰 <b>{title}</b>\n\n"
-            f"{description}\n\n"
+            f"📰 <b>{safe_title}</b>\n\n"
+            f"{safe_description}\n\n"
             f"@imatixnews"
         )
 
     return (
-        f"📰 <b>{title}</b>\n\n"
+        f"📰 <b>{safe_title}</b>\n\n"
         f"@imatixnews"
     )
 
@@ -609,10 +568,14 @@ async def send_news(
     link = entry.get("link")
 
     if not link:
+
         return False
 
-    # جلوگیری از تکرار
-    if link in sent_links:
+    # =====================================================
+    # CHECK DUPLICATE
+    # =====================================================
+
+    if is_news_sent(link):
 
         print(
             f"SKIPPED DUPLICATE | {title}"
@@ -620,47 +583,20 @@ async def send_news(
 
         return False
 
-
-    print(
-        f"AI CHECK | {title}"
-    )
-
-
     # =====================================================
-    # AI FILTER + TRANSLATION + REWRITE
+    # TRANSLATION
     # =====================================================
 
-    analysis = await analyze_news(
-        title,
-        description,
-        language
-    )
-
-    if not analysis.get("publish"):
+    if language == "en":
 
         print(
-            f"NEWS REJECTED | {title} | "
-            f"{analysis.get('reason', '')}"
+            f"Translating: {title}"
         )
 
-        # مهم:
-        # اضافه کردن به sent_links باعث می‌شود
-        # دوباره همان خبر بررسی نشود.
-        sent_links.add(link)
-
-        return False
-
-
-    title = analysis.get(
-        "title",
-        title
-    )
-
-    description = analysis.get(
-        "description",
-        description
-    )
-
+        title, description = await translate_to_persian(
+            title,
+            description
+        )
 
     # =====================================================
     # MESSAGE
@@ -675,54 +611,11 @@ async def send_news(
         link
     )
 
-
-    # =====================================================
-    # MEDIA
-    # =====================================================
-
-    image_url = get_image(
-        entry
-    )
-
-    video_url = get_video(
-        entry
-    )
-
-
-    # =====================================================
-    # VIDEO
-    # =====================================================
-
-    if video_url:
-
-        try:
-
-            await bot.send_video(
-                chat_id=CHANNEL_ID,
-                video=video_url,
-                caption=message,
-                parse_mode="HTML",
-                reply_markup=keyboard
-            )
-
-            print(
-                f"VIDEO SENT | {source_name}"
-            )
-
-            sent_links.add(link)
-
-            return True
-
-        except Exception as error:
-
-            print(
-                f"VIDEO ERROR | {error}"
-            )
-
-
     # =====================================================
     # IMAGE
     # =====================================================
+
+    image_url = get_image(entry)
 
     if image_url:
 
@@ -736,11 +629,15 @@ async def send_news(
                 reply_markup=keyboard
             )
 
+            save_news(
+                link,
+                title,
+                source_name
+            )
+
             print(
                 f"IMAGE SENT | {source_name}"
             )
-
-            sent_links.add(link)
 
             return True
 
@@ -749,7 +646,6 @@ async def send_news(
             print(
                 f"IMAGE ERROR | {error}"
             )
-
 
     # =====================================================
     # TEXT
@@ -764,11 +660,15 @@ async def send_news(
             reply_markup=keyboard
         )
 
+        save_news(
+            link,
+            title,
+            source_name
+        )
+
         print(
             f"TEXT SENT | {source_name}"
         )
-
-        sent_links.add(link)
 
         return True
 
@@ -795,11 +695,9 @@ async def check_news():
 
         return
 
-
     bot = Bot(
         token=BOT_TOKEN
     )
-
 
     print(
         "======================================"
@@ -813,7 +711,6 @@ async def check_news():
         "======================================"
     )
 
-
     for source_name, rss_url, language in RSS_FEEDS:
 
         print(
@@ -822,7 +719,8 @@ async def check_news():
 
         try:
 
-            feed = feedparser.parse(
+            feed = await asyncio.to_thread(
+                feedparser.parse,
                 rss_url
             )
 
@@ -834,15 +732,12 @@ async def check_news():
 
                 continue
 
-
             print(
                 f"Found {len(feed.entries)} entries."
             )
 
-
-            for entry in feed.entries[
-                :MAX_NEWS_PER_SOURCE
-            ]:
+            # فقط 3 خبر از هر منبع
+            for entry in feed.entries[:3]:
 
                 await send_news(
                     bot,
@@ -851,20 +746,17 @@ async def check_news():
                     language
                 )
 
-                # فاصله بین ارسال‌ها
                 await asyncio.sleep(2)
-
 
         except Exception as error:
 
             print(
-                f"RSS ERROR | {source_name}"
+                f"RSS ERROR: {source_name}"
             )
 
             print(
                 str(error)
             )
-
 
     print(
         "News check completed."
@@ -926,7 +818,10 @@ if __name__ == "__main__":
         "======================================"
     )
 
+    # ساخت دیتابیس
+    init_database()
 
+    # سرور Health برای Render
     web_thread = threading.Thread(
         target=start_web_server,
         daemon=True
@@ -934,5 +829,5 @@ if __name__ == "__main__":
 
     web_thread.start()
 
-
+    # شروع ربات
     news_loop()
