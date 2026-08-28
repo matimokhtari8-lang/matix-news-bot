@@ -5,7 +5,6 @@ import time
 import re
 import html
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse
 
 import feedparser
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -18,22 +17,45 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@imatixnews")
 
-# بررسی خبرها هر 10 دقیقه
 CHECK_INTERVAL = 600
 
-# منابع RSS
+# =========================================================
+# NEWS SOURCES
+# =========================================================
+
 RSS_FEEDS = [
-    "https://www.isna.ir/rss",
-    "https://www.tasnimnews.com/fa/rss"
+
+    # 🇮🇷 ایران
+    {
+        "name": "ایسنا",
+        "url": "https://www.isna.ir/rss"
+    },
+
+    {
+        "name": "تسنیم",
+        "url": "https://www.tasnimnews.com/fa/rss"
+    },
+
+    # 🌍 BBC World
+    {
+        "name": "BBC World",
+        "url": "https://feeds.bbci.co.uk/news/world/rss.xml"
+    },
+
+    # 🇬🇧 BBC UK
+    {
+        "name": "BBC UK",
+        "url": "https://feeds.bbci.co.uk/news/uk/rss.xml"
+    }
 ]
 
 
-# لینک‌هایی که در اجرای فعلی ارسال شده‌اند
+# جلوگیری از ارسال تکراری در زمان اجرای فعلی
 sent_links = set()
 
 
 # =========================================================
-# RENDER WEB SERVER
+# RENDER HEALTH SERVER
 # =========================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -67,10 +89,7 @@ def start_web_server():
     )
 
     server = HTTPServer(
-        (
-            "0.0.0.0",
-            port
-        ),
+        ("0.0.0.0", port),
         HealthHandler
     )
 
@@ -82,7 +101,7 @@ def start_web_server():
 
 
 # =========================================================
-# TEXT CLEANER
+# CLEAN TEXT
 # =========================================================
 
 def clean_text(text):
@@ -110,12 +129,11 @@ def clean_text(text):
 
 
 # =========================================================
-# GET IMAGE
+# FIND IMAGE
 # =========================================================
 
 def get_image(item):
 
-    # media_content
     media_content = item.get(
         "media_content"
     )
@@ -124,14 +142,28 @@ def get_image(item):
 
         for media in media_content:
 
-            url = media.get(
-                "url"
+            url = media.get("url")
+
+            media_type = media.get(
+                "type",
+                ""
             )
 
-            if url:
+            if url and (
+                media_type.startswith("image/")
+                or url.lower().endswith(
+                    (
+                        ".jpg",
+                        ".jpeg",
+                        ".png",
+                        ".webp"
+                    )
+                )
+            ):
+
                 return url
 
-    # media_thumbnail
+
     media_thumbnail = item.get(
         "media_thumbnail"
     )
@@ -140,14 +172,12 @@ def get_image(item):
 
         for media in media_thumbnail:
 
-            url = media.get(
-                "url"
-            )
+            url = media.get("url")
 
             if url:
                 return url
 
-    # enclosure
+
     enclosures = item.get(
         "enclosures"
     )
@@ -165,23 +195,13 @@ def get_image(item):
                 ""
             )
 
-            if url and (
-                media_type.startswith(
-                    "image/"
-                )
-                or
-                url.lower().endswith(
-                    (
-                        ".jpg",
-                        ".jpeg",
-                        ".png",
-                        ".webp"
-                    )
-                )
+            if url and media_type.startswith(
+                "image/"
             ):
+
                 return url
 
-    # image داخل description
+
     description = item.get(
         "description",
         ""
@@ -197,16 +217,16 @@ def get_image(item):
 
         return match.group(1)
 
+
     return None
 
 
 # =========================================================
-# GET VIDEO
+# FIND VIDEO
 # =========================================================
 
 def get_video(item):
 
-    # media_content
     media_content = item.get(
         "media_content"
     )
@@ -215,9 +235,7 @@ def get_video(item):
 
         for media in media_content:
 
-            url = media.get(
-                "url"
-            )
+            url = media.get("url")
 
             media_type = media.get(
                 "type",
@@ -225,11 +243,8 @@ def get_video(item):
             )
 
             if url and (
-                media_type.startswith(
-                    "video/"
-                )
-                or
-                url.lower().endswith(
+                media_type.startswith("video/")
+                or url.lower().endswith(
                     (
                         ".mp4",
                         ".mov",
@@ -238,9 +253,10 @@ def get_video(item):
                     )
                 )
             ):
+
                 return url
 
-    # enclosures
+
     enclosures = item.get(
         "enclosures"
     )
@@ -259,11 +275,8 @@ def get_video(item):
             )
 
             if url and (
-                media_type.startswith(
-                    "video/"
-                )
-                or
-                url.lower().endswith(
+                media_type.startswith("video/")
+                or url.lower().endswith(
                     (
                         ".mp4",
                         ".mov",
@@ -272,13 +285,15 @@ def get_video(item):
                     )
                 )
             ):
+
                 return url
+
 
     return None
 
 
 # =========================================================
-# CREATE MESSAGE
+# MESSAGE
 # =========================================================
 
 def create_message(
@@ -301,22 +316,20 @@ def create_message(
             + "..."
         )
 
+
     if summary:
 
-        message = (
+        return (
             f"📰 <b>{title}</b>\n\n"
             f"{summary}\n\n"
             f"@imatixnews"
         )
 
-    else:
 
-        message = (
-            f"📰 <b>{title}</b>\n\n"
-            f"@imatixnews"
-        )
-
-    return message
+    return (
+        f"📰 <b>{title}</b>\n\n"
+        f"@imatixnews"
+    )
 
 
 # =========================================================
@@ -325,7 +338,7 @@ def create_message(
 
 def create_button(link):
 
-    keyboard = InlineKeyboardMarkup(
+    return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
@@ -336,16 +349,15 @@ def create_button(link):
         ]
     )
 
-    return keyboard
-
 
 # =========================================================
-# SEND ONE NEWS
+# SEND NEWS
 # =========================================================
 
-async def send_one_news(
+async def send_news(
     bot,
-    item
+    item,
+    source_name
 ):
 
     title = clean_text(
@@ -366,13 +378,14 @@ async def send_one_news(
         )
     )
 
-    if not link:
 
+    if not link:
         return False
+
 
     if link in sent_links:
-
         return False
+
 
     image_url = get_image(
         item
@@ -382,18 +395,21 @@ async def send_one_news(
         item
     )
 
+
     message = create_message(
         title,
         summary
     )
 
+
     keyboard = create_button(
         link
     )
 
-    # -----------------------------------------------------
+
+    # =====================================================
     # VIDEO
-    # -----------------------------------------------------
+    # =====================================================
 
     if video_url:
 
@@ -408,7 +424,7 @@ async def send_one_news(
             )
 
             print(
-                f"VIDEO SENT: {title}"
+                f"VIDEO SENT | {source_name} | {title}"
             )
 
             sent_links.add(
@@ -420,12 +436,13 @@ async def send_one_news(
         except Exception as error:
 
             print(
-                f"Video failed: {error}"
+                f"VIDEO ERROR | {error}"
             )
 
-    # -----------------------------------------------------
+
+    # =====================================================
     # IMAGE
-    # -----------------------------------------------------
+    # =====================================================
 
     if image_url:
 
@@ -440,7 +457,7 @@ async def send_one_news(
             )
 
             print(
-                f"IMAGE SENT: {title}"
+                f"IMAGE SENT | {source_name} | {title}"
             )
 
             sent_links.add(
@@ -452,12 +469,13 @@ async def send_one_news(
         except Exception as error:
 
             print(
-                f"Image failed: {error}"
+                f"IMAGE ERROR | {error}"
             )
 
-    # -----------------------------------------------------
-    # TEXT ONLY
-    # -----------------------------------------------------
+
+    # =====================================================
+    # TEXT
+    # =====================================================
 
     try:
 
@@ -469,7 +487,7 @@ async def send_one_news(
         )
 
         print(
-            f"TEXT SENT: {title}"
+            f"TEXT SENT | {source_name} | {title}"
         )
 
         sent_links.add(
@@ -481,14 +499,14 @@ async def send_one_news(
     except Exception as error:
 
         print(
-            f"Telegram error: {error}"
+            f"TELEGRAM ERROR | {error}"
         )
 
         return False
 
 
 # =========================================================
-# CHECK RSS
+# CHECK ALL SOURCES
 # =========================================================
 
 async def check_news():
@@ -501,34 +519,39 @@ async def check_news():
 
         return
 
-    if not CHANNEL_ID:
-
-        print(
-            "ERROR: CHANNEL_ID is missing!"
-        )
-
-        return
 
     bot = Bot(
         token=BOT_TOKEN
     )
+
 
     print(
         "================================"
     )
 
     print(
-        "Checking news..."
+        "Checking all news sources..."
     )
+
+    print(
+        "================================"
+    )
+
 
     total_found = 0
     total_sent = 0
 
-    for rss_url in RSS_FEEDS:
+
+    for source in RSS_FEEDS:
+
+        source_name = source["name"]
+        rss_url = source["url"]
+
 
         print(
-            f"RSS: {rss_url}"
+            f"Checking: {source_name}"
         )
+
 
         try:
 
@@ -536,111 +559,4 @@ async def check_news():
                 rss_url
             )
 
-        except Exception as error:
-
-            print(
-                f"RSS ERROR: {error}"
-            )
-
-            continue
-
-        if not feed.entries:
-
-            print(
-                "No entries found."
-            )
-
-            continue
-
-        print(
-            f"Found {len(feed.entries)} news"
-        )
-
-        # بررسی 5 خبر آخر
-        for item in feed.entries[:5]:
-
-            total_found += 1
-
-            result = await send_one_news(
-                bot,
-                item
-            )
-
-            if result:
-
-                total_sent += 1
-
-    print(
-        f"Found: {total_found}"
-    )
-
-    print(
-        f"Sent: {total_sent}"
-    )
-
-    print(
-        "================================"
-    )
-
-
-# =========================================================
-# NEWS LOOP
-# =========================================================
-
-def news_loop():
-
-    while True:
-
-        try:
-
-            asyncio.run(
-                check_news()
-            )
-
-        except Exception as error:
-
-            print(
-                f"MAIN ERROR: {error}"
-            )
-
-        print(
-            "Waiting 10 minutes..."
-        )
-
-        time.sleep(
-            CHECK_INTERVAL
-        )
-
-
-# =========================================================
-# START
-# =========================================================
-
-if __name__ == "__main__":
-
-    print(
-        "================================"
-    )
-
-    print(
-        "       MATIX NEWS BOT"
-    )
-
-    print(
-        "       Starting..."
-    )
-
-    print(
-        "================================"
-    )
-
-    # Render health server
-    web_thread = threading.Thread(
-        target=start_web_server,
-        daemon=True
-    )
-
-    web_thread.start()
-
-    # News loop
-    news_loop()
+        except
